@@ -132,6 +132,8 @@ abstract class RecoverForXCompilationUnit[CompilationUnitType <: AstNode](
   protected def members: Traversal[Member] =
     cu.ast.isMember
 
+  /** For each call that contains the returnValue directive, attempt to replace the return value by the dynamic
+    */
   protected def visitCall(call: Call): Unit = {
     symbolTable.get(call).foreach { methodFullName =>
       val index = methodFullName.indexOf("<returnValue>")
@@ -152,19 +154,28 @@ abstract class RecoverForXCompilationUnit[CompilationUnitType <: AstNode](
     }
   }
 
+  protected def visitParameter(param: MethodParameterIn): Unit = {
+    if (param.dynamicTypeHintFullName.isEmpty) return
+    val matchingIdentifiers = param.method._identifierViaContainsOut
+      .nameExact(param.name)
+      .l
+    matchingIdentifiers.foreach { identifier =>
+      symbolTable.append(LocalVar(identifier.name), param.dynamicTypeHintFullName.toSet)
+    }
+  }
+
   override def compute(): Unit = try {
     prepopulateSymbolTable()
     // Set known aliases that point to imports for local and external methods/modules
     visitImports(importNodes(cu))
     // Prune import names if the methods exist in the CPG
     postVisitImports()
-    // Populate fields
-    members.foreach(visitMembers)
     // Populate local symbol table with assignments
     assignments.foreach(visitAssignments)
-    // Propagate return values
+    // Propagate return types
     cpg.method.ast.isCall.foreach(visitCall)
-
+    // Propagate parameter types
+    cpg.parameter.foreach(visitParameter)
     // Persist findings
     setTypeInformation()
   } finally {
@@ -219,14 +230,6 @@ abstract class RecoverForXCompilationUnit[CompilationUnitType <: AstNode](
     * types or methods.
     */
   protected def postVisitImports(): Unit = {}
-
-  /** Using member information, will propagate member information to the global and local symbol table. By default,
-    * fields in the local table will be prepended with "this".
-    */
-  protected def visitMembers(member: Member): Unit = {
-    symbolTable.append(LocalVar(member.name), Set.empty[String])
-    globalTable.append(FieldVar(member.typeDecl.fullName, member.name), Set.empty[String])
-  }
 
   /** Using assignment and import information (in the global symbol table), will propagate these types in the symbol
     * table.
@@ -781,11 +784,32 @@ abstract class RecoverForXCompilationUnit[CompilationUnitType <: AstNode](
       }
   }
 
-  private def persistType(x: StoredNode, types: Set[String])(implicit builder: DiffGraphBuilder): Unit =
+  private def persistType(x: StoredNode, types: Set[String])(implicit builder: DiffGraphBuilder): Unit = {
     if (types.nonEmpty)
       if (types.size == 1)
         builder.setNodeProperty(x, PropertyNames.TYPE_FULL_NAME, types.head)
       else
         builder.setNodeProperty(x, PropertyNames.DYNAMIC_TYPE_HINT_FULL_NAME, types.toSeq)
+    x match {
+      case i: Identifier if globalTable.contains(i) => persistGlobalIdentifierType(i)
+      case _                                        =>
+    }
+  }
+
+  private def persistGlobalIdentifierType(i: Identifier): Unit = {
+    val ts = globalTable.get(i)
+    globalTable.keyFromNode(i).collectAll[FieldVar].foreach { fk =>
+      cpg.typeDecl.fullNameExact(fk.compUnitFullName).member.nameExact(fk.identifier).foreach { member =>
+        val updatedTypes =
+          (Seq(member.typeFullName) ++ member.dynamicTypeHintFullName ++ ts).distinct.filterNot(_ == "ANY")
+        if (updatedTypes.nonEmpty) {
+          if (updatedTypes.size == 1)
+            builder.setNodeProperty(member, PropertyNames.TYPE_FULL_NAME, updatedTypes.head)
+          else
+            builder.setNodeProperty(member, PropertyNames.DYNAMIC_TYPE_HINT_FULL_NAME, updatedTypes)
+        }
+      }
+    }
+  }
 
 }
