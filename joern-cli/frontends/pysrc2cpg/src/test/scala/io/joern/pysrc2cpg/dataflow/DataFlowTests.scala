@@ -271,6 +271,31 @@ class DataFlowTests extends PySrc2CpgFixture(withOssDataflow = true) {
     args.size shouldBe 3
   }
 
+  "Import statement with method ref sample three" in {
+    val controller =
+      """
+        |from django.contrib import admin
+        |from django.urls import path
+        |from django.conf.urls import url
+        |from .import views
+        |
+        |urlpatterns = [
+        |    url(r'^allPage/$', views.all_page)
+        |]
+        |""".stripMargin
+    val views =
+      """
+        |def all_page(request):
+        |	print("All pages")
+        |""".stripMargin
+    val cpg = code("print('Hello, world!')")
+      .moreCode(controller, "controller/urls.py")
+      .moreCode(views, "controller/views.py")
+
+    val args = cpg.call.methodFullName("django.*[.](path|url)").l.head.argument.l
+    args.size shouldBe 3
+  }
+
   "flow from function param to sink" in {
     val cpg: Cpg = code("""
       |import requests
